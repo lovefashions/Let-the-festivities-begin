@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<!-- saved from url=(0059)https://extensions.shopifycdn.com/shopifycloud/v3/load.html -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <title>Shopify UI Extensions Internal</title>
+    
+  </head>
+  <body>
+    <script>
+      if (
+        !/(^extensions\.shopifycdn\.com|^localhost:\d+|\.spin\.dev)$/.test(
+          location.host,
+        )
+      ) {
+        throw Error('blocked');
+      }
+
+      /**
+       * Fetches made within the opaque origin workers will not use the HTTP cache.
+       * As a workaround, fetch() in the worker is overridden to use this iframe's fetch.
+       *
+       * @param {string} url
+       * @param {RequestInit} requestInit
+       * @param {MessagePort} returnPort
+       */
+      async function extensionOriginFetch(url, requestInit, returnPort) {
+        const controller = new AbortController();
+
+        returnPort.addEventListener('message', function (event) {
+          if (event.data == null) return;
+
+          if (event.data.action === 'abort') {
+            controller.abort(event.data.reason ?? undefined);
+            return;
+          }
+        });
+
+        returnPort.start();
+
+        try {
+          const response = await fetch(url, {
+            ...requestInit,
+            signal: controller.signal,
+          });
+          const body = await response.arrayBuffer();
+
+          returnPort.postMessage(
+            {
+              response: {
+                body,
+                init: {
+                  headers: [...response.headers],
+                  status: response.status,
+                  statusText: response.statusText,
+                },
+              },
+            },
+            [body],
+          );
+        } catch (error) {
+          returnPort.postMessage({error});
+        } finally {
+          returnPort.close();
+        }
+      }
+
+      addEventListener('message', async function (event) {
+        const data = event.data;
+        const portToAdmin = data.workerPort;
+        const terminatePort = data.terminatePort;
+
+        if (data == null || typeof data.__run !== 'string' || !portToAdmin || !terminatePort) return;
+
+        // TODO: We should handle failure better here
+        const response = await fetch(data.__run);
+        const scriptSource = await response.text();
+
+        // Using a data: URL creates a worker with an opaque origin.
+        const workerURL =
+          'data:text/javascript;charset=UTF-8,' +
+          encodeURIComponent(scriptSource);
+
+
+
+        const worker = new Worker(workerURL, {
+          name: data.name || 'unknown',
+        });
+        worker.postMessage({__replace: portToAdmin}, [portToAdmin]);
+
+        worker.addEventListener('message', function (event) {
+          const data = event.data;
+
+          if (data == null) return;
+
+          if (data.action === 'fetch') {
+            extensionOriginFetch(data.url, data.requestInit, data.returnPort);
+          }
+        });
+
+        terminatePort.addEventListener('message', function (event) {
+          const data = event.data;
+          if (!data.action) return;
+
+          if (data.action === 'terminate') {
+            worker.terminate();
+            terminatePort.close();
+            return;
+          }
+        });
+
+        terminatePort.start();
+      });
+    </script>
+  
+
+</body></html>
